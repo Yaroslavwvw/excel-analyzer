@@ -1,150 +1,142 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
-from io import BytesIO
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
 import pandas as pd
 import numpy as np
-from typing import List
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime
+import json
+import io
+from docx import Document
+from docx.shared import Pt
 
-# Инициализация FastAPI приложения
-app = FastAPI(
-    title="Excel to Markdown API",
-    description="API для обработки Excel файлов и генерации отчетов в формате Markdown",
-    version="1.0.0"
-)
+app = FastAPI()
 
-@app.get("/")
-def read_root():
-    """Корневой маршрут, возвращающий информацию о сервисе"""
-    return {
-        "message": "Excel to Markdown API работает",
-        "endpoints": {
-            "/process-excel/": "Загрузка и обработка Excel-файла с генерацией отчета в формате Markdown"
-        }
-    }
+with open("parameters.json", "r") as f:
+    parameters = json.load(f)
 
-@app.post("/process-excel/")
-async def process_excel(file: UploadFile = File(...)):
-    """
-    Обрабатывает загруженный Excel-файл и возвращает отчет в формате Markdown
-    """
-    # Проверка формата файла
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(
-            status_code=400,
-            detail="Поддерживаются только файлы Excel (.xlsx, .xls)"
-        )
+def convert_coordinates(X, Y, Z, dX, dY, dZ, wx, wy, wz, m, to_gsk):
+    if not to_gsk:
+        m = -m
+        wx, wy, wz = -wx, -wy, -wz
+        dX, dY, dZ = -dX, -dY, -dZ
+
+    R = np.array([
+        [1, wz, -wy],
+        [-wz, 1, wx],
+        [wy, -wx, 1]
+    ])
+
+    input_coords = np.array([X, Y, Z])
+    transformed = (1 + m) * R @ input_coords + np.array([dX, dY, dZ])
+    return transformed[0], transformed[1], transformed[2]
+
+def create_docx_report(from_system, to_system, result_df):
+    doc = Document()
+    doc.add_heading('Результат преобразования координат', level=1)
+    doc.add_paragraph(f'Исходная система: {from_system}')
+    doc.add_paragraph(f'Целевая система: {to_system}')
+    doc.add_paragraph('Первые 5 строк результата:')
+
+    table = doc.add_table(rows=1, cols=len(result_df.columns))
+    hdr_cells = table.rows[0].cells
+    for i, col_name in enumerate(result_df.columns):
+        hdr_cells[i].text = col_name
+
+    for _, row in result_df.head().iterrows():
+        row_cells = table.add_row().cells
+        for i, val in enumerate(row):
+            row_cells[i].text = str(val)
+
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Arial'
+    font.size = Pt(10)
+
+    f = io.BytesIO()
+    doc.save(f)
+    f.seek(0)
+    return f.read()
+
+@app.post("/convert")
+async def convert(
+    file: UploadFile = File(...),
+    from_system: str = "СК-42",
+    to_system: str = "ГСК-2011"
+):
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Требуется файл Excel (.xlsx или .xls)")
 
     try:
-        # Чтение содержимого файла
         contents = await file.read()
-        buffer = BytesIO(contents)
+        df = pd.read_excel(io.BytesIO(contents))
 
-        # Загрузка Excel-файла в DataFrame
-        df = pd.read_excel(buffer)
+        required_columns = ['X', 'Y', 'Z']
+        if not all(col in df.columns for col in required_columns):
+            raise HTTPException(status_code=400, detail=f"Файл должен содержать колонки: {required_columns}")
 
-        # Генерация отчета в формате Markdown на основе данных
-        report = generate_markdown_report(df)
+        converted = []
 
-        # Создание байтового объекта для хранения отчета
-        output = BytesIO(report.encode())
-        output.seek(0)
+        for _, row in df.iterrows():
+            X, Y, Z = row['X'], row['Y'], row['Z']
 
-        # Возвращаем отчет как скачиваемый файл
-        filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        return StreamingResponse(
-            output,
-            media_type="text/markdown",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
+            if to_system == "ГСК-2011":
+                p = parameters[from_system]
+                res = convert_coordinates(X, Y, Z,
+                                          p["dX"], p["dY"], p["dZ"],
+                                          np.radians(p["wx"] / 3600),
+                                          np.radians(p["wy"] / 3600),
+                                          np.radians(p["wz"] / 3600),
+                                          p["m"],
+                                          to_gsk=True)
+            elif from_system == "ГСК-2011":
+                p = parameters[to_system]
+                res = convert_coordinates(X, Y, Z,
+                                          p["dX"], p["dY"], p["dZ"],
+                                          np.radians(p["wx"] / 3600),
+                                          np.radians(p["wy"] / 3600),
+                                          np.radians(p["wz"] / 3600),
+                                          p["m"],
+                                          to_gsk=False)
+            else:
+                p_from = parameters[from_system]
+                X1, Y1, Z1 = convert_coordinates(X, Y, Z,
+                                                 p_from["dX"], p_from["dY"], p_from["dZ"],
+                                                 np.radians(p_from["wx"] / 3600),
+                                                 np.radians(p_from["wy"] / 3600),
+                                                 np.radians(p_from["wz"] / 3600),
+                                                 p_from["m"],
+                                                 to_gsk=True)
+
+                p_to = parameters[to_system]
+                res = convert_coordinates(X1, Y1, Z1,
+                                          p_to["dX"], p_to["dY"], p_to["dZ"],
+                                          np.radians(p_to["wx"] / 3600),
+                                          np.radians(p_to["wy"] / 3600),
+                                          np.radians(p_to["wz"] / 3600),
+                                          p_to["m"],
+                                          to_gsk=False)
+
+            converted.append(res)
+
+        result_df = pd.DataFrame(converted, columns=["X", "Y", "Z"])
+
+        stream = io.StringIO()
+        result_df.to_csv(stream, index=False)
+
+        report_md = f"""## 📊 Результат преобразования
+
+### Исходная система: `{from_system}`
+### Целевая система: `{to_system}`
+
+#### Первые 5 строк результата:
+{result_df.head().to_markdown(index=False)}"""
+
+        docx_bytes = create_docx_report(from_system, to_system, result_df)
+
+        # Отправляем docx в hex-строке
+        return JSONResponse(content={
+            "csv": stream.getvalue(),
+            "report": report_md,
+            "docx": docx_bytes.hex()
+        })
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка обработки файла: {str(e)}")
-
-def generate_markdown_report(df: pd.DataFrame) -> str:
-    """
-    Генерирует отчет в формате Markdown на основе предоставленного DataFrame
-    """
-    # Создаем заголовок отчета
-    report = f"# Отчет по анализу данных\n\n"
-    report += f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-    # Основная информация о данных
-    report += f"## Общая информация\n\n"
-    report += f"- **Количество строк**: {df.shape[0]}\n"
-    report += f"- **Количество столбцов**: {df.shape[1]}\n"
-    report += f"- **Столбцы**: {', '.join(df.columns)}\n\n"
-
-    # Статистика по числовым столбцам
-    report += f"## Статистический анализ\n\n"
-
-    # Проверяем наличие числовых столбцов
-    numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
-    if numeric_columns:
-        report += f"### Числовые данные\n\n"
-        stats_df = df[numeric_columns].describe().transpose()
-        # Форматируем статистику в виде таблицы Markdown
-        stats_table = "| Столбец | Количество | Среднее | Ст. отклонение | Мин | 25% | 50% | 75% | Макс |\n"
-        stats_table += "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-
-        for column, row in stats_df.iterrows():
-            stats_table += f"| {column} | {row['count']:.0f} | {row['mean']:.2f} | {row['std']:.2f} | {row['min']:.2f} | {row['25%']:.2f} | {row['50%']:.2f} | {row['75%']:.2f} | {row['max']:.2f} |\n"
-
-        report += stats_table + "\n\n"
-
-    # Анализ категориальных данных
-    categorical_columns = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    if categorical_columns:
-        report += f"### Категориальные данные\n\n"
-
-        for column in categorical_columns:
-            value_counts = df[column].value_counts().head(5)  # Топ-5 значений
-            report += f"#### {column}\n\n"
-
-            # Создаем таблицу с частотами значений
-            report += "| Значение | Количество | Процент |\n"
-            report += "| --- | --- | --- |\n"
-
-            for value, count in value_counts.items():
-                percentage = (count / len(df)) * 100
-                report += f"| {value} | {count} | {percentage:.2f}% |\n"
-
-            report += "\n"
-
-    # Анализ пропущенных значений
-    report += f"## Анализ пропущенных значений\n\n"
-    missing_values = df.isnull().sum()
-    if missing_values.sum() > 0:
-        report += "| Столбец | Пропущенные значения | Процент пропущенных |\n"
-        report += "| --- | --- | --- |\n"
-
-        for column, missing in missing_values.items():
-            if missing > 0:
-                percentage = (missing / len(df)) * 100
-                report += f"| {column} | {missing} | {percentage:.2f}% |\n"
-
-        report += "\n"
-    else:
-        report += "Пропущенные значения отсутствуют.\n\n"
-
-    # Заключение
-    report += "## Выводы\n\n"
-    report += "На основе анализа данных можно сделать следующие выводы:\n\n"
-    report += "1. Данные содержат информацию о " + str(df.shape[0]) + " записях с " + str(df.shape[1]) + " характеристиками.\n"
-
-    if numeric_columns:
-        # Находим столбец с наибольшим средним значением
-        max_mean_column = df[numeric_columns].mean().idxmax()
-        max_mean_value = df[numeric_columns].mean().max()
-        report += f"2. Столбец '{max_mean_column}' имеет наибольшее среднее значение ({max_mean_value:.2f}).\n"
-
-    if missing_values.sum() > 0:
-        most_missing = missing_values.idxmax()
-        most_missing_count = missing_values.max()
-        report += f"3. Столбец '{most_missing}' имеет наибольшее количество пропущенных значений ({most_missing_count}).\n"
-
-    report += "\n"
-
-    return report
+        raise HTTPException(status_code=500, detail=str(e))

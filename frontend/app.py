@@ -1,99 +1,66 @@
 import streamlit as st
-import pandas as pd
 import requests
+import pandas as pd
 import io
-from urllib.parse import urljoin
+import binascii
 
-# Конфигурация приложения
-st.set_page_config(
-    page_title="Excel Analyzer",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+BACKEND_URL = "https://backservice-l6s9.onrender.com/convert"
 
-# URL бэкенда на render.com
-# Замените на свой URL после развертывания на render.com
-BACKEND_URL = "https://excel-to-markdown-api.onrender.com"
+st.set_page_config(page_title="🌍 Конвертер координат", layout="centered")
 
-# Функции для взаимодействия с бэкендом
-def check_api_status():
-    """Проверяем доступность API"""
-    try:
-        response = requests.get(BACKEND_URL, timeout=10)
-        return response.status_code == 200
-    except requests.RequestException:
-        return False
+st.title("🌍 Конвертер координат между системами")
+st.markdown("Загрузите Excel-файл с координатами и выберите системы для преобразования.")
 
-def process_excel(file):
-    """Отправляем Excel-файл на обработку в API и получаем Markdown-отчет"""
-    url = urljoin(BACKEND_URL, "/process-excel/")
-    files = {"file": file}
-    try:
-        response = requests.post(url, files=files)
-        if response.status_code == 200:
-            return response.content.decode('utf-8')
-        else:
-            st.error(f"Ошибка при обработке файла: {response.text}")
-            return None
-    except requests.RequestException as e:
-        st.error(f"Ошибка соединения с API: {str(e)}")
-        return None
+uploaded_file = st.file_uploader("Выберите Excel-файл (.xlsx)", type=["xlsx", "xls"])
 
-# Интерфейс приложения
-def main():
-    st.title("📊 Анализатор Excel файлов")
-    st.markdown("""
-    Этот инструмент позволяет загрузить Excel-файл и получить аналитический отчет
-    в формате Markdown. Просто загрузите файл и нажмите кнопку "Анализировать".
-    """)
+systems = ["СК-42", "СК-95", "ПЗ-90", "ПЗ-90.02", "ПЗ-90.11", "WGS-84", "ITRF-2008"]
+from_system = st.selectbox("Исходная система:", systems)
+to_system = st.selectbox("Целевая система:", ["ГСК-2011"])
 
-    # Проверка статуса API
-    if not check_api_status():
-        st.error("⚠️ Не удалось подключиться к API. Пожалуйста, проверьте соединение или попробуйте позже.")
-        return
-
-    # Загрузка файла
-    uploaded_file = st.file_uploader("Выберите Excel файл", type=['xlsx', 'xls'])
-
-    if uploaded_file is not None:
-        # Показываем предварительный просмотр данных
+if uploaded_file and st.button("🚀 Выполнить преобразование"):
+    with st.spinner("Преобразование данных... Это может занять несколько секунд"):
         try:
-            df = pd.read_excel(uploaded_file)
-            st.subheader("Предварительный просмотр данных")
-            st.dataframe(df.head(5))
+            files = {
+                "file": (
+                    uploaded_file.name,
+                    uploaded_file.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            }
+            data = {"from_system": from_system, "to_system": to_system}
 
-            # Получение основных статистик для информации
-            st.subheader("Базовая информация")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Строки", df.shape[0])
-            col2.metric("Столбцы", df.shape[1])
-            col3.metric("Пропущенные значения", df.isna().sum().sum())
+            response = requests.post(BACKEND_URL, data=data, files=files)
 
-            # Сбрасываем указатель файла для повторного чтения
-            uploaded_file.seek(0)
+            if response.status_code == 200:
+                result = response.json()
 
-            if st.button("Анализировать"):
-                with st.spinner("Обрабатываем данные..."):
-                    markdown_report = process_excel(uploaded_file)
+                st.markdown("### 📄 Отчет о преобразовании:")
+                st.markdown(result["report"])
 
-                if markdown_report:
-                    st.success("Отчет успешно создан!")
+                df = pd.read_csv(io.StringIO(result["csv"]))
+                st.markdown("### 📊 Первые 5 строк результата:")
+                st.dataframe(df.head())
 
-                    # Показываем отчет в интерфейсе
-                    st.subheader("Отчет")
-                    st.markdown(markdown_report)
+                # Кнопка скачивания CSV
+                st.download_button(
+                    label="📥 Скачать результат в CSV",
+                    data=result["csv"],
+                    file_name="converted_coordinates.csv",
+                    mime="text/csv"
+                )
 
-                    # Предоставляем возможность скачать отчет
+                # Кнопка скачивания DOCX
+                if "docx" in result:
+                    docx_bytes = binascii.unhexlify(result["docx"])
                     st.download_button(
-                        label="Скачать отчет",
-                        data=markdown_report,
-                        file_name="report.md",
-                        mime="text/markdown",
+                        label="📥 Скачать результат в DOCX",
+                        data=docx_bytes,
+                        file_name="converted_coordinates.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
+            else:
+                error = response.json().get("detail", "Неизвестная ошибка")
+                st.error(f"❌ Ошибка при обработке данных: {error}")
 
         except Exception as e:
-            st.error(f"Ошибка при чтении файла: {str(e)}")
-
-if __name__ == "__main__":
-    main()
+            st.error(f"⚠️ Произошла ошибка: {str(e)}")

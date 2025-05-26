@@ -1,7 +1,8 @@
-fastapi
-uvicorn
-pandas
-numpy
-openpyxl
-matplotlib
-seaborn
+fastapi>=0.95.0
+uvicorn>=0.21.1
+pandas>=2.0.0
+numpy>=1.24.3
+openpyxl>=3.0.0  # Для поддержки Excel (.xlsx)
+python-multipart
+tabulate
+python-docx
