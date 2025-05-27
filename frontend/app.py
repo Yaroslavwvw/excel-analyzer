@@ -4,7 +4,7 @@ import pandas as pd
 import io
 import binascii
 
-BACKEND_URL = "https://backservice-l6s9.onrender.com/convert"
+BACKEND_URL = "https://excel-analyzer.onrender.com/convert"
 
 st.set_page_config(page_title="🌍 Конвертер координат", layout="centered")
 
