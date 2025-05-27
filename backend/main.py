@@ -9,7 +9,12 @@ from docx.shared import Pt
 
 app = FastAPI()
 
-with open("parameters.json", "r") as f:
+import os
+
+base_dir = os.path.dirname(os.path.abspath(__file__))
+param_path = os.path.join(base_dir, "parameters.json")
+
+with open(param_path, "r", encoding="utf-8") as f:
     parameters = json.load(f)
 
 def convert_coordinates(X, Y, Z, dX, dY, dZ, wx, wy, wz, m, to_gsk):
