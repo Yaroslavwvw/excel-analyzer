@@ -6,3 +6,4 @@ openpyxl>=3.0.0  # Для поддержки Excel (.xlsx)
 python-multipart
 tabulate
 python-docx
+sympy
